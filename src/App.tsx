@@ -34,8 +34,6 @@ import {
 import { GoogleGenAI } from "@google/genai";
 import * as XLSX from 'xlsx';
 import Markdown from 'react-markdown';
-import { jsPDF } from 'jspdf';
-import html2canvas from 'html2canvas';
 import { cn } from '@/src/lib/utils';
 import { generateSampleData, calculateStats, StatsResult, ProductionData, generateSinglePoint, detectAnomalies, Anomaly } from '@/src/lib/stats';
 import { Button } from '@/src/components/ui/Button';
@@ -65,7 +63,6 @@ export default function App() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isExporting, setIsExporting] = useState(false);
   const analysisRef = useRef<HTMLDivElement>(null);
   
   // New Visualization States
@@ -271,31 +268,8 @@ export default function App() {
     XLSX.writeFile(wb, "produktionsdata_mall.xlsx");
   };
 
-  const exportToPdf = async () => {
-    if (!analysisRef.current) return;
-    setIsExporting(true);
-    try {
-      const element = analysisRef.current;
-      const canvas = await html2canvas(element, {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: isDarkMode ? '#1e293b' : '#ffffff',
-      });
-      
-      const imgData = canvas.toDataURL('image/png');
-      const pdf = new jsPDF({
-        orientation: 'portrait',
-        unit: 'px',
-        format: [canvas.width / 2, canvas.height / 2]
-      });
-      
-      pdf.addImage(imgData, 'PNG', 0, 0, canvas.width / 2, canvas.height / 2);
-      pdf.save(`AI_Analys_${new Date().toISOString().split('T')[0]}.pdf`);
-    } catch (error) {
-      console.error("PDF Export failed:", error);
-    } finally {
-      setIsExporting(false);
-    }
+  const handlePrint = () => {
+    window.print();
   };
 
   const runAiAnalysis = async () => {
@@ -498,7 +472,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-background text-foreground transition-colors duration-300">
       {/* Header */}
-      <header className="bg-card border-b border-border sticky top-0 z-50">
+      <header className="no-print bg-card border-b border-border sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="bg-primary p-2 rounded-lg">
@@ -511,7 +485,7 @@ export default function App() {
           </div>
           
           {/* Desktop Actions */}
-          <div className="hidden lg:flex items-center gap-3">
+          <div className="no-print hidden lg:flex items-center gap-3">
             <div className="flex items-center gap-1 bg-muted p-1 rounded-xl border border-border">
               <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".xlsx, .xls, .csv" className="hidden" />
               <Button 
@@ -558,7 +532,7 @@ export default function App() {
           </div>
 
           {/* Mobile Menu Toggle */}
-          <div className="lg:hidden flex items-center gap-2">
+          <div className="no-print lg:hidden flex items-center gap-2">
             <Button variant="ghost" size="icon" onClick={() => setIsDarkMode(!isDarkMode)}>
               {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </Button>
@@ -570,7 +544,7 @@ export default function App() {
 
         {/* Mobile Menu Overlay */}
         {isMobileMenuOpen && (
-          <div className="lg:hidden absolute top-16 left-0 w-full bg-card border-b border-border p-4 space-y-4 shadow-xl animate-in slide-in-from-top duration-200">
+          <div className="no-print lg:hidden absolute top-16 left-0 w-full bg-card border-b border-border p-4 space-y-4 shadow-xl animate-in slide-in-from-top duration-200">
             <div className="grid grid-cols-2 gap-2">
               <Button variant="outline" className="w-full" onClick={() => fileInputRef.current?.click()}>
                 <Upload className="w-4 h-4" /> Excel
@@ -602,7 +576,7 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 py-6 md:py-8">
         {/* Navigation Tabs */}
-        <div className="flex gap-1 bg-muted p-1 rounded-xl w-full sm:w-fit mb-6 md:mb-8">
+        <div className="no-print flex gap-1 bg-muted p-1 rounded-xl w-full sm:w-fit mb-6 md:mb-8">
           <button
             onClick={() => setActiveTab('dashboard')}
             className={cn(
@@ -627,7 +601,7 @@ export default function App() {
         </div>
 
         {activeTab === 'dashboard' ? (
-          <div className="space-y-6 md:space-y-8">
+          <div className="no-print space-y-6 md:space-y-8">
             {/* Stats Overview */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
               <StatCard 
@@ -1241,7 +1215,7 @@ export default function App() {
                 </div>
               </Card>
 
-              <div className="space-y-6">
+              <div className="no-print space-y-6">
                 <Card className="h-full flex flex-col justify-center">
                   <div className="flex items-start gap-4 text-amber-500 bg-amber-500/10 p-6 rounded-2xl border border-amber-500/20">
                     <AlertTriangle className="w-6 h-6 shrink-0" />
@@ -1258,8 +1232,8 @@ export default function App() {
           </div>
         ) : (
           <div className="max-w-4xl mx-auto">
-            <Card padding="none">
-              <div className="bg-primary px-6 py-4 flex items-center justify-between">
+            <Card padding="none" className="card-print">
+              <div className="no-print bg-primary px-6 py-4 flex items-center justify-between">
                 <div className="flex items-center gap-3 text-primary-foreground">
                   <Brain className="w-6 h-6" />
                   <h3 className="font-bold text-lg">AI Multi-Agent Analysis</h3>
@@ -1267,6 +1241,13 @@ export default function App() {
               </div>
               
               <div className="p-6 md:p-8">
+                {/* Print-only Header */}
+                <div className="hidden print:block mb-8 border-b-2 border-primary pb-4">
+                  <h1 className="text-2xl font-black text-primary">AI PRODUKTIONSANALYS</h1>
+                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Statistisk Processkontroll • Realtidsrapport</p>
+                  <p className="text-xs mt-2">Datum: {new Date().toLocaleDateString('sv-SE')}</p>
+                </div>
+
                 {!aiAnalysis && !isAnalyzing ? (
                   <div className="text-center py-12">
                     <div className="bg-muted w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -1314,8 +1295,9 @@ export default function App() {
                         <FileText className="w-4 h-4" />
                         Baserat på {data.length} datapunkter
                       </div>
-                      <Button variant="ghost" size="sm" onClick={exportToPdf} isLoading={isExporting}>
-                        Exportera PDF
+                      <Button variant="primary" size="sm" onClick={handlePrint} className="gap-2">
+                        <Download className="w-4 h-4" />
+                        Skriv ut / Spara som PDF
                       </Button>
                     </div>
                   </div>

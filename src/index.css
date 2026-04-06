@@ -48,15 +48,26 @@
 
 @layer components {
   .prose h1, .prose h2, .prose h3 {
-    @apply font-bold tracking-tight text-foreground mt-8 mb-4;
+    @apply font-bold tracking-tight mt-8 mb-4;
+    color: #0f172a;
+  }
+
+  .dark .prose h1, .dark .prose h2, .dark .prose h3 {
+    color: #f8fafc;
   }
 
   .prose h1 { @apply text-2xl; }
-  .prose h2 { @apply text-xl border-b border-border pb-2; }
+  .prose h2 { @apply text-xl border-b pb-2; border-color: #e2e8f0; }
+  .dark .prose h2 { border-color: #334155; }
   .prose h3 { @apply text-lg; }
 
   .prose p {
-    @apply mb-4 leading-relaxed text-foreground/80;
+    @apply mb-4 leading-relaxed;
+    color: #64748b;
+  }
+
+  .dark .prose p {
+    color: #94a3b8;
   }
 
   .prose ul, .prose ol {
@@ -67,10 +78,63 @@
   .prose ol { @apply list-decimal; }
 
   .prose li {
-    @apply text-foreground/80;
+    color: #64748b;
+  }
+
+  .dark .prose li {
+    color: #94a3b8;
   }
 
   .prose strong {
-    @apply font-bold text-foreground;
+    @apply font-bold;
+    color: #0f172a;
+  }
+
+  .dark .prose strong {
+    color: #f8fafc;
+  }
+}
+
+@media print {
+  body {
+    background-color: white !important;
+    color: black !important;
+  }
+
+  .print\:hidden {
+    display: none !important;
+  }
+
+  .prose {
+    max-width: none !important;
+    padding: 0 !important;
+    background-color: white !important;
+    color: #0f172a !important;
+  }
+
+  .prose h1, .prose h2, .prose h3 {
+    color: #4f46e5 !important;
+    page-break-after: avoid;
+  }
+
+  .prose h2 {
+    border-bottom: 1px solid #e2e8f0 !important;
+  }
+
+  .prose p, .prose li {
+    color: #334155 !important;
+  }
+
+  /* Hide everything except the analysis when printing the analysis tab */
+  .no-print {
+    display: none !important;
+  }
+
+  /* Ensure the analysis card is full width and no shadow/border in print */
+  .card-print {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
   }
 }
