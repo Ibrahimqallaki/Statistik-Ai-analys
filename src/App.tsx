@@ -93,14 +93,16 @@ export default function App() {
   const [right, setRight] = useState<string | number>('dataMax');
   const [refAreaLeft, setRefAreaLeft] = useState<string | number>('');
   const [refAreaRight, setRefAreaRight] = useState<string | number>('');
-  const [top, setTop] = useState<string | number>('dataMax + 1');
-  const [bottom, setBottom] = useState<string | number>('dataMin - 1');
+  const [top, setTop] = useState<string | number>('auto');
+  const [bottom, setBottom] = useState<string | number>('auto');
 
   // Trend Zoom States
   const [trendLeft, setTrendLeft] = useState<string | number>('dataMin');
   const [trendRight, setTrendRight] = useState<string | number>('dataMax');
   const [trendRefAreaLeft, setTrendRefAreaLeft] = useState<string | number>('');
   const [trendRefAreaRight, setTrendRefAreaRight] = useState<string | number>('');
+  const [trendTop, setTrendTop] = useState<string | number>('auto');
+  const [trendBottom, setTrendBottom] = useState<string | number>('auto');
 
   // Cp/Cpk Trend States
   const [statsHistory, setStatsHistory] = useState<{timestamp: string, cp: number, cpk: number}[]>([]);
@@ -179,8 +181,8 @@ export default function App() {
       return {
         ...d,
         movingAverage: avg,
-        upperBand: stats ? stats.mean + stats.stdDev * 2 : null,
-        lowerBand: stats ? stats.mean - stats.stdDev * 2 : null,
+        upperBand: stats ? stats.ucl : null,
+        lowerBand: stats ? stats.lcl : null,
       };
     });
   };
@@ -362,6 +364,17 @@ export default function App() {
     // xAxis domain
     if (_refAreaLeft > _refAreaRight) [_refAreaLeft, _refAreaRight] = [_refAreaRight, _refAreaLeft];
 
+    // Calculate Y-axis limits for the selected range
+    const rangeData = data.filter(d => d.timestamp >= _refAreaLeft && d.timestamp <= _refAreaRight);
+    if (rangeData.length > 0) {
+      const values = rangeData.map(d => Number(d[selectedMetric] || 0));
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const padding = (max - min) * 0.1;
+      setBottom(min - padding);
+      setTop(max + padding);
+    }
+
     setRefAreaLeft('');
     setRefAreaRight('');
     setLeft(_refAreaLeft);
@@ -371,6 +384,8 @@ export default function App() {
   const zoomOut = () => {
     setLeft('dataMin');
     setRight('dataMax');
+    setTop('auto');
+    setBottom('auto');
     setRefAreaLeft('');
     setRefAreaRight('');
   };
@@ -387,6 +402,17 @@ export default function App() {
 
     if (_refAreaLeft > _refAreaRight) [_refAreaLeft, _refAreaRight] = [_refAreaRight, _refAreaLeft];
 
+    // Calculate Y-axis limits for trend
+    const rangeData = statsHistory.filter(d => d.timestamp >= _refAreaLeft && d.timestamp <= _refAreaRight);
+    if (rangeData.length > 0) {
+      const values = rangeData.map(d => Number(d[selectedStatsMetric] || 0));
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const padding = (max - min) * 0.1;
+      setTrendBottom(min - padding);
+      setTrendTop(max + padding);
+    }
+
     setTrendRefAreaLeft('');
     setTrendRefAreaRight('');
     setTrendLeft(_refAreaLeft);
@@ -396,6 +422,8 @@ export default function App() {
   const trendZoomOut = () => {
     setTrendLeft('dataMin');
     setTrendRight('dataMax');
+    setTrendTop('auto');
+    setTrendBottom('auto');
     setTrendRefAreaLeft('');
     setTrendRefAreaRight('');
   };
@@ -605,27 +633,82 @@ export default function App() {
             {/* Stats Overview */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
               <StatCard 
-                title="Cp" 
-                value={stats?.cp.toFixed(3) || '0.000'} 
-                icon={<TrendingUp className="w-4 h-4" />}
-                status={stats && stats.cp > 1.33 ? 'success' : 'warning'}
-              />
-              <StatCard 
-                title="Cpk" 
+                title="Cpk (Potential)" 
                 value={stats?.cpk.toFixed(3) || '0.000'} 
+                icon={<TrendingUp className="w-4 h-4" />}
+                status={stats && stats.cpk > 1.33 ? 'success' : 'warning'}
+                subValue={`Cp: ${stats?.cp.toFixed(2) || '0.00'}`}
+              />
+              <StatCard 
+                title="Ppk (Performance)" 
+                value={stats?.ppk.toFixed(3) || '0.000'} 
                 icon={<Activity className="w-4 h-4" />}
-                status={stats && stats.cpk > 1.33 ? 'success' : 'danger'}
+                status={stats && stats.ppk > 1.33 ? 'success' : 'danger'}
+                subValue={`Pp: ${stats?.pp.toFixed(2) || '0.00'}`}
               />
               <StatCard 
-                title="Mean" 
-                value={stats?.mean.toFixed(2) || '0.00'} 
-                icon={<Settings className="w-4 h-4" />}
+                title="Normalfördelning" 
+                value={stats?.isNormal ? 'JA' : 'NEJ'} 
+                icon={<Brain className="w-4 h-4" />}
+                status={stats?.isNormal ? 'success' : 'warning'}
+                subValue={`p: ${stats?.shapiroWilkP.toFixed(4) || '0.0000'}`}
               />
               <StatCard 
-                title="Std Dev" 
-                value={stats?.stdDev.toFixed(3) || '0.000'} 
-                icon={<AlertTriangle className="w-4 h-4" />}
+                title="Process-Status" 
+                value={anomalies.length === 0 ? 'Stabil' : 'Instabil'} 
+                icon={<AlertCircle className="w-4 h-4" />}
+                status={anomalies.length === 0 ? 'success' : 'danger'}
+                subValue={`${anomalies.length} avvikelser`}
               />
+            </div>
+
+            {/* Detailed Stats Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <Card className="p-4 bg-muted/20 border-dashed">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold text-muted-foreground uppercase">Medelvärde & Spridning</span>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase">Mean</p>
+                    <p className="text-sm font-black">{stats?.mean.toFixed(3)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase">Std Dev</p>
+                    <p className="text-sm font-black">{stats?.stdDev.toFixed(4)}</p>
+                  </div>
+                </div>
+              </Card>
+              <Card className="p-4 bg-muted/20 border-dashed">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold text-muted-foreground uppercase">Form & Fördelning</span>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase">Skewness</p>
+                    <p className="text-sm font-black">{stats?.skewness.toFixed(3)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase">Kurtosis</p>
+                    <p className="text-sm font-black">{stats?.kurtosis.toFixed(3)}</p>
+                  </div>
+                </div>
+              </Card>
+              <Card className="p-4 bg-muted/20 border-dashed">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold text-muted-foreground uppercase">Kontrollgränser (3σ)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase">UCL</p>
+                    <p className="text-sm font-black text-amber-600">{stats?.ucl.toFixed(3)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-muted-foreground uppercase">LCL</p>
+                    <p className="text-sm font-black text-amber-600">{stats?.lcl.toFixed(3)}</p>
+                  </div>
+                </div>
+              </Card>
             </div>
 
             {/* Main Chart */}
@@ -636,6 +719,11 @@ export default function App() {
                     <Activity className="w-5 h-5 text-primary" />
                     {selectedMetric === 'value' ? 'Process Control Chart' : 
                      selectedMetric === 'temperature' ? 'Temperaturövervakning' : 'Tryckövervakning'}
+                    {(left !== 'dataMin' || right !== 'dataMax') && (
+                      <span className="text-[10px] font-black text-primary bg-primary/10 px-2 py-0.5 rounded-full animate-pulse">
+                        ZOOMAD VY
+                      </span>
+                    )}
                   </h3>
                   <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
                     Realtidsövervakning av produktionskvalitet
@@ -846,12 +934,18 @@ export default function App() {
                       domain={[left, right]}
                       type="category"
                       allowDataOverflow
-                      tickFormatter={(time) => new Date(time).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' })}
+                      tickFormatter={(time) => {
+                        const date = new Date(time);
+                        if (left !== 'dataMin') {
+                          return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                        }
+                        return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+                      }}
                       label={showXAxis ? { value: xAxisLabel, position: 'insideBottom', offset: -5, fontSize: 10, fill: 'var(--muted-foreground)', fontWeight: 'bold' } : undefined}
                     />
                     <YAxis 
                       hide={!showYAxis}
-                      domain={['auto', 'auto']} 
+                      domain={[bottom, top]} 
                       stroke="var(--muted-foreground)" 
                       fontSize={10} 
                       fontWeight="bold" 
@@ -859,15 +953,32 @@ export default function App() {
                     />
                     <Tooltip content={<CustomTooltip />} />
                     
+                    {refAreaLeft && refAreaRight ? (
+                      <ReferenceAreaAny x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} fill="var(--primary)" fillOpacity={0.1} />
+                    ) : null}
+
+                    {/* Specification Limits */}
+                    <ReferenceLine y={usl} stroke="#f43f5e" strokeDasharray="3 3" label={{ value: uslLabel, position: 'right', fill: '#f43f5e', fontSize: 10, fontWeight: 'bold' }} />
+                    <ReferenceLine y={lsl} stroke="#f43f5e" strokeDasharray="3 3" label={{ value: lslLabel, position: 'right', fill: '#f43f5e', fontSize: 10, fontWeight: 'bold' }} />
+                    
+                    {/* Control Limits (UCL/LCL) */}
+                    {stats && (
+                      <>
+                        <ReferenceLine y={stats.ucl} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'UCL', position: 'left', fill: '#f59e0b', fontSize: 10, fontWeight: 'bold' }} />
+                        <ReferenceLine y={stats.lcl} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'LCL', position: 'left', fill: '#f59e0b', fontSize: 10, fontWeight: 'bold' }} />
+                        <ReferenceLine y={stats.mean} stroke="var(--primary)" strokeOpacity={0.5} label={{ value: 'Mean', position: 'insideTopLeft', fill: 'var(--primary)', fontSize: 10, fontWeight: 'bold' }} />
+                      </>
+                    )}
+
                     {/* Statistical Bands */}
                     {showStatsBands && (
                       <Area 
                         type="monotone" 
                         dataKey="upperBand" 
                         stroke="none" 
-                        fill="#f43f5e" 
+                        fill="#f59e0b" 
                         fillOpacity={0.05} 
-                        name="Upper Band (2σ)"
+                        name="Control Band (UCL)"
                       />
                     )}
                     {showStatsBands && (
@@ -875,9 +986,9 @@ export default function App() {
                         type="monotone" 
                         dataKey="lowerBand" 
                         stroke="none" 
-                        fill="#f43f5e" 
+                        fill="#f59e0b" 
                         fillOpacity={0.05} 
-                        name="Lower Band (2σ)"
+                        name="Control Band (LCL)"
                       />
                     )}
 
@@ -1003,9 +1114,15 @@ export default function App() {
                   <h3 className="text-base md:text-lg font-bold flex items-center gap-2">
                     <TrendingUp className="w-5 h-5 text-primary" />
                     Kapacitetstrend (Rolling {selectedStatsMetric.toUpperCase()})
-                    <span className="hidden sm:inline text-[10px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full ml-2 normal-case">
-                      Klicka & dra för att zooma
-                    </span>
+                    {(trendLeft !== 'dataMin' || trendRight !== 'dataMax') ? (
+                      <span className="text-[10px] font-black text-primary bg-primary/10 px-2 py-0.5 rounded-full animate-pulse">
+                        ZOOMAD VY
+                      </span>
+                    ) : (
+                      <span className="hidden sm:inline text-[10px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full ml-2 normal-case">
+                        Klicka & dra för att zooma
+                      </span>
+                    )}
                   </h3>
                   <div className="flex items-center gap-2 bg-muted p-1 rounded-lg">
                     {(['cp', 'cpk'] as const).map((metric) => (
@@ -1096,18 +1213,29 @@ export default function App() {
                         domain={[trendLeft, trendRight]}
                         type="category"
                         allowDataOverflow
-                        tickFormatter={(time) => new Date(time).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' })}
+                        tickFormatter={(time) => {
+                          const date = new Date(time);
+                          if (trendLeft !== 'dataMin') {
+                            return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                          }
+                          return date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+                        }}
                         label={showTrendXAxis ? { value: trendXAxisLabel, position: 'insideBottom', offset: -5, fontSize: 10, fill: 'var(--muted-foreground)', fontWeight: 'bold' } : undefined}
                       />
                       <YAxis 
                         hide={!showTrendYAxis}
-                        domain={[0, 'auto']} 
+                        domain={[trendBottom, trendTop]} 
                         stroke="var(--muted-foreground)" 
                         fontSize={10} 
                         fontWeight="bold" 
                         label={showTrendYAxis ? { value: trendYAxisLabel, angle: -90, position: 'insideLeft', fontSize: 10, fill: 'var(--muted-foreground)', fontWeight: 'bold' } : undefined}
                       />
                       <Tooltip content={<CustomTooltip />} />
+                      
+                      {trendRefAreaLeft && trendRefAreaRight ? (
+                        <ReferenceAreaAny x1={trendRefAreaLeft} x2={trendRefAreaRight} strokeOpacity={0.3} fill="var(--primary)" fillOpacity={0.1} />
+                      ) : null}
+
                       <ReferenceLine y={1.33} stroke="#10b981" strokeDasharray="3 3" label={{ value: '1.33', position: 'right', fill: '#10b981', fontSize: 10 }} />
                       <ReferenceLine y={1.0} stroke="#f59e0b" strokeDasharray="3 3" label={{ value: '1.0', position: 'right', fill: '#f59e0b', fontSize: 10 }} />
                       
@@ -1393,6 +1521,42 @@ function SopModal({ isOpen, onClose }: { isOpen: boolean, onClose: () => void })
             icon={<Play className="w-4 h-4" />}
             content="Aktivera 'Starta Stream' för att simulera inkommande data var 3:e sekund. Detta är användbart för att testa larmgränser och realtidsuppdateringar."
           />
+
+          <SopSection 
+            title="6. API Integration" 
+            icon={<FileText className="w-4 h-4" />}
+            content={
+              <div className="space-y-4">
+                <p className="text-xs">Du kan skicka data till appen via ett REST API. Detta gör det möjligt att koppla upp sensorer eller PLC-system direkt.</p>
+                <div className="bg-muted p-3 rounded-lg font-mono text-[10px] space-y-2">
+                  <p className="text-primary font-bold">POST /api/production-data</p>
+                  <pre className="text-foreground/70">
+{`{
+  "value": 10.5,
+  "temperature": 22.3,
+  "pressure": 101.2
+}`}
+                  </pre>
+                </div>
+              </div>
+            }
+          />
+
+          <SopSection 
+            title="7. Databaskoppling (SQL)" 
+            icon={<Settings className="w-4 h-4" />}
+            content={
+              <div className="space-y-4">
+                <p className="text-xs">Appen är förberedd för PostgreSQL. För att aktivera permanent lagring:</p>
+                <ol className="list-decimal list-inside text-[10px] space-y-2 ml-1">
+                  <li>Gå till <strong>Settings</strong> i AI Studio.</li>
+                  <li>Lägg till miljövariabler: <code className="bg-muted px-1">DB_HOST</code>, <code className="bg-muted px-1">DB_NAME</code>, <code className="bg-muted px-1">DB_USER</code>, <code className="bg-muted px-1">DB_PASSWORD</code>.</li>
+                  <li>Starta om servern. Appen skapar automatiskt tabellen <code className="bg-muted px-1">production_logs</code>.</li>
+                </ol>
+                <p className="text-[10px] text-amber-500 font-bold">⚠️ Om inga variabler anges körs appen i "Mock Mode" med exempeldata.</p>
+              </div>
+            }
+          />
         </div>
 
         <div className="p-6 border-t border-border bg-muted/30 flex justify-end">
@@ -1417,11 +1581,12 @@ function SopSection({ title, icon, content }: { title: string, icon: React.React
   );
 }
 
-function StatCard({ title, value, icon, status }: { 
+function StatCard({ title, value, icon, status, subValue }: { 
   title: string, 
   value: string, 
   icon: React.ReactNode, 
-  status?: 'success' | 'warning' | 'danger'
+  status?: 'success' | 'warning' | 'danger',
+  subValue?: string
 }) {
   const statusClasses = {
     success: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20',
@@ -1447,6 +1612,7 @@ function StatCard({ title, value, icon, status }: {
       <div>
         <h4 className="text-muted-foreground text-[10px] font-bold uppercase tracking-widest mb-1">{title}</h4>
         <div className="text-xl md:text-2xl font-black tracking-tight">{value}</div>
+        {subValue && <div className="text-[9px] font-bold text-muted-foreground mt-1 uppercase tracking-tighter">{subValue}</div>}
       </div>
     </Card>
   );
