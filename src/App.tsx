@@ -38,10 +38,17 @@ import { cn } from '@/src/lib/utils';
 import { generateSampleData, calculateStats, StatsResult, ProductionData, generateSinglePoint, detectAnomalies, Anomaly } from '@/src/lib/stats';
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
+import { ImportWizard } from '@/src/components/ImportWizard';
+
+import { auth, signInWithGoogle, logout, db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { collection, addDoc, serverTimestamp, query, orderBy, limit, getDocs } from 'firebase/firestore';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [reports, setReports] = useState<any[]>([]);
   const [data, setData] = useState<ProductionData[]>([]);
   const [usl, setUsl] = useState(11.5);
   const [lsl, setLsl] = useState(8.5);
@@ -56,9 +63,10 @@ export default function App() {
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSopOpen, setIsSopOpen] = useState(false);
+  const [isImportWizardOpen, setIsImportWizardOpen] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [analysisStep, setAnalysisStep] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'analysis'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'analysis' | 'history'>('dashboard');
   const [isStreaming, setIsStreaming] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
@@ -170,19 +178,23 @@ export default function App() {
   }, [data, usl, lsl, selectedMetric, trendWindowSize]);
 
   const getChartData = () => {
-    if (!showMovingAverage && !showStatsBands) return data;
-
     return data.map((d, i) => {
       const windowSize = 5;
       const start = Math.max(0, i - windowSize + 1);
       const subset = data.slice(start, i + 1).map(p => Number(p[selectedMetric] || 0));
       const avg = subset.reduce((a, b) => a + b, 0) / subset.length;
       
+      // Check if this point is an anomaly
+      const pointAnomaly = anomalies.find(a => a.timestamp === d.timestamp);
+      
       return {
         ...d,
-        movingAverage: avg,
-        upperBand: stats ? stats.ucl : null,
-        lowerBand: stats ? stats.lcl : null,
+        movingAverage: showMovingAverage ? avg : null,
+        upperBand: showStatsBands && stats ? stats.ucl : null,
+        lowerBand: showStatsBands && stats ? stats.lcl : null,
+        anomalyValue: pointAnomaly ? d[selectedMetric] : null,
+        anomalyType: pointAnomaly ? pointAnomaly.type : null,
+        testNumber: pointAnomaly ? pointAnomaly.id.split('-')[0].replace('we', '').replace('oos', 'OOS') : null
       };
     });
   };
@@ -213,6 +225,13 @@ export default function App() {
     setAiAnalysis(null);
     setFileName(null);
     setIsStreaming(false);
+  };
+
+  const handleImportedData = (newData: ProductionData[], sourceName: string) => {
+    setData(newData);
+    setFileName(sourceName);
+    setIsStreaming(false);
+    setAiAnalysis(null);
   };
 
   const toggleStreaming = () => {
@@ -279,21 +298,23 @@ export default function App() {
     setAiAnalysis(null);
     try {
       const statsSummary = JSON.stringify(stats);
-      const dataPoints = data.slice(-30).map(d => `${d.timestamp}: ${d[selectedMetric].toFixed(2)}`).join('\n');
+      const dataPoints = data.slice(-30).map(d => `${d.timestamp}: ${typeof d[selectedMetric] === 'number' ? d[selectedMetric].toFixed(2) : 'N/A'}`).join('\n');
       const anomaliesSummary = JSON.stringify(anomalies);
       
       // Step 1: Technical Analysis (The Statistician)
       setAnalysisStep("Steg 1: Statistisk Granskning...");
       const step1Prompt = `
-        Du är en Senior Statistiker inom produktion. Analysera följande data:
+        Du är en Senior Statistiker inom produktion (Expert på SPC och Nelson Rules). Analysera följande data:
         Mätvärde: ${selectedMetric}
         Statistik: ${statsSummary}
         Anomalier: ${anomaliesSummary}
         Senaste 30 punkterna:
         ${dataPoints}
         
-        Din uppgift är att ge en strikt teknisk sammanfattning av processens stabilitet och kapabilitet (Cp/Cpk). 
-        Identifiera trender (drift) och statistiska avvikelser. Svara på svenska.
+        Din uppgift är att ge en strikt teknisk och objektiv sammanfattning av processens stabilitet. 
+        Analysera Cp/Cpk och Pp/Ppk (skillnaden mellan potential och faktiskt utfall).
+        Identifiera mönster som "mixture", "stratification", "hugging" eller "oscillation" baserat på Western Electric/Nelson rules.
+        Svara på svenska med fokus på siffror och trender.
       `;
       const step1Response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
@@ -304,12 +325,14 @@ export default function App() {
       // Step 2: Diagnostic Analysis (The Diagnostician)
       setAnalysisStep("Steg 2: Diagnostisk Analys...");
       const step2Prompt = `
-        Du är en Diagnostisk Expert inom industriella processer. 
-        Baserat på denna tekniska sammanfattning:
+        Du är en Expert på Rotorsaksanalys (RCA) och industriell felsökning. 
+        Baserat på denna statistiska granskning:
         "${technicalSummary}"
         
-        Förklara VARFÖR dessa mönster uppstår. Koppla samman anomalier med trender. 
-        Finns det tecken på cykliska fel, sensor-drift eller plötsliga processförändringar? Svara på svenska.
+        Förklara de fysiska orsakerna bakom de statistiska mönstren. 
+        Varför uppstår denna specifika variation? 
+        Koppla samman drift med termiska effekter, verktygsförslitning, materialvariationer eller operatörsfel (överjustering). 
+        Analysera om variansen är "Common Cause" eller "Special Cause". Svara på svenska.
       `;
       const step2Response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
@@ -319,26 +342,52 @@ export default function App() {
 
       // Step 3: Actionable Recommendations (The Advisor)
       setAnalysisStep("Steg 3: Strategiska Rekommendationer...");
+      const today = new Date().toLocaleDateString('sv-SE', { year: 'numeric', month: 'long', day: 'numeric' });
       const step3Prompt = `
-        Du är en Senior Produktionsrådgivare. 
-        Baserat på den tekniska analysen: "${technicalSummary}"
-        Och den diagnostiska analysen: "${diagnosticSummary}"
+        Du är en Senior Produktionsrådgivare. Skapa en mycket professionell och "prescriptive" produktionsrapport baserat på följande information.
         
-        Skapa en slutgiltig rapport till operatören på svenska. 
-        Inkludera:
-        1. Övergripande status (Grön/Gul/Röd)
-        2. Vad som händer just nu
-        3. Prognos för närmaste timmen
-        4. Konkreta åtgärder (Prescriptive actions)
+        Teknisk statistisk analys: "${technicalSummary}"
+        Diagnostisk rotorsaksanalys: "${diagnosticSummary}"
         
-        Använd Markdown-formatering med tydliga rubriker.
+        Rapporten SKALL börja med dagens datum i fetstil längst upp.
+        
+        Din rapport ska följa denna struktur strikt:
+
+        # ⚠️ PRODUKTIONSRAPPORT: [KORT KRAFTFULL RUBRIK]
+        **Datum:** ${today}  
+        **Status:** [RÖD/GUL/GRÖN]  
+        **Process:** [Kort teknisk beskrivning av huvudproblemet, t.ex. "Instabilitet i variation" eller "Termisk drift"]
+
+        ## 1. Övergripande status: [FÄRG]
+        [En tydlig sammanfattning av om processen är kapabel (Cp/Cpk) och om vi producerar acceptabel kvalitet just nu.]
+
+        ## 2. Vad händer just nu?
+        [Analys av mätpunkterna. Nämn specifika klockslag för anomalier om de finns i datan. Beskriv mönster som "Hunting", "Drift" eller "Shift".]
+
+        ## 3. Prognos för närmaste timmen
+        [Baserat på trenden, vad är sannolikheten för kassation (skrot) inom kort?]
+
+        ## 4. Konkreta åtgärder (Prescriptive Actions)
+        [Ge 3-5 numrerade, mycket specifika åtgärder för operatören. T.ex. "Kontrollera kylvätskenivå", "Justera offset med -0.05", "Inspektera skärstål".]
+
+        ## 5. Beslutspunkt
+        [Tydlig instruktion om när linjen måsta pausas för RCA eller verktygsbyte.]
+
+        Använd ett auktoritärt språk för en expert. Svara på svenska.
       `;
       const step3Response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: step3Prompt,
       });
 
-      setAiAnalysis(step3Response.text || "Kunde inte generera analys.");
+      const finalAnalysis = step3Response.text || "Kunde inte generera analys.";
+      setAiAnalysis(finalAnalysis);
+      
+      // Save to Firebase
+      if (user) {
+        saveReportToFirebase(finalAnalysis);
+      }
+
       setAnalysisStep(null);
       setActiveTab('analysis');
       setIsMobileMenuOpen(false);
@@ -351,6 +400,49 @@ export default function App() {
     }
   };
 
+  // Firebase Auth Effect
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      if (u) {
+        fetchReports();
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const fetchReports = async () => {
+    try {
+      const q = query(collection(db, 'reports'), orderBy('timestamp', 'desc'), limit(10));
+      const querySnapshot = await getDocs(q);
+      const fetchedReports = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setReports(fetchedReports);
+    } catch (error) {
+      console.error("Error fetching reports:", error);
+    }
+  };
+
+  const saveReportToFirebase = async (content: string) => {
+    if (!user) return;
+    
+    // Extract status from content (Red/Yellow/Green)
+    let status = 'GRÖN';
+    if (content.includes('RÖD')) status = 'RÖD';
+    else if (content.includes('GUL')) status = 'GUL';
+
+    try {
+      await addDoc(collection(db, 'reports'), {
+        timestamp: new Date().toISOString(),
+        content,
+        status,
+        metric: selectedMetric,
+        userId: user.uid
+      });
+      fetchReports();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'reports');
+    }
+  };
   const zoom = () => {
     let _refAreaLeft = refAreaLeft;
     let _refAreaRight = refAreaRight;
@@ -515,17 +607,16 @@ export default function App() {
           {/* Desktop Actions */}
           <div className="no-print hidden lg:flex items-center gap-3">
             <div className="flex items-center gap-1 bg-muted p-1 rounded-xl border border-border">
-              <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".xlsx, .xls, .csv" className="hidden" />
               <Button 
                 variant={fileName ? 'primary' : 'ghost'} 
                 size="sm" 
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => setIsImportWizardOpen(true)}
               >
                 <Upload className="w-3.5 h-3.5" />
-                {fileName ? fileName : "Ladda upp Excel"}
+                {fileName ? fileName : "Importera data..."}
               </Button>
-              <Button variant="ghost" size="icon" onClick={downloadTemplate} title="Ladda ner mall">
-                <Download className="w-3.5 h-3.5" />
+              <Button variant="ghost" size="icon" onClick={() => setIsImportWizardOpen(true)} title="Öppna Guide & Mallar">
+                <Info className="w-3.5 h-3.5" />
               </Button>
             </div>
 
@@ -554,6 +645,22 @@ export default function App() {
 
             <div className="w-px h-6 bg-border mx-1" />
 
+            {user ? (
+              <div className="flex items-center gap-3 pl-2">
+                <div className="text-right hidden sm:block">
+                  <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">Expertrådgivare</p>
+                  <p className="text-xs font-black truncate max-w-[150px]">{user.email}</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={logout} className="gap-2">
+                  <X className="w-4 h-4" /> Logga ut
+                </Button>
+              </div>
+            ) : (
+              <Button variant="primary" size="sm" onClick={signInWithGoogle} className="gap-2">
+                <Activity className="w-4 h-4" /> Logga in
+              </Button>
+            )}
+
             <Button variant="ghost" size="icon" onClick={() => setIsDarkMode(!isDarkMode)}>
               {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </Button>
@@ -573,12 +680,9 @@ export default function App() {
         {/* Mobile Menu Overlay */}
         {isMobileMenuOpen && (
           <div className="no-print lg:hidden absolute top-16 left-0 w-full bg-card border-b border-border p-4 space-y-4 shadow-xl animate-in slide-in-from-top duration-200">
-            <div className="grid grid-cols-2 gap-2">
-              <Button variant="outline" className="w-full" onClick={() => fileInputRef.current?.click()}>
-                <Upload className="w-4 h-4" /> Excel
-              </Button>
-              <Button variant="outline" className="w-full" onClick={downloadTemplate}>
-                <Download className="w-4 h-4" /> Mall
+            <div className="grid grid-cols-1 gap-2">
+              <Button variant="outline" className="w-full" onClick={() => { setIsImportWizardOpen(true); setIsMobileMenuOpen(false); }}>
+                <Upload className="w-4 h-4" /> Importera data (Guide)
               </Button>
             </div>
             <Button 
@@ -626,32 +730,42 @@ export default function App() {
             AI Insights
             {aiAnalysis && <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />}
           </button>
+          <button
+            onClick={() => setActiveTab('history')}
+            className={cn(
+              "flex-1 sm:flex-none px-6 py-2 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2",
+              activeTab === 'history' ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <FileText className="w-4 h-4" />
+            Historik
+          </button>
         </div>
 
-        {activeTab === 'dashboard' ? (
+        {activeTab === 'dashboard' && (
           <div className="no-print space-y-6 md:space-y-8">
             {/* Stats Overview */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
               <StatCard 
                 title="Cpk (Potential)" 
-                value={stats?.cpk.toFixed(3) || '0.000'} 
+                value={stats?.cpk ? stats.cpk.toFixed(3) : '0.000'} 
                 icon={<TrendingUp className="w-4 h-4" />}
                 status={stats && stats.cpk > 1.33 ? 'success' : 'warning'}
-                subValue={`Cp: ${stats?.cp.toFixed(2) || '0.00'}`}
+                subValue={`Cp: ${stats?.cp ? stats.cp.toFixed(2) : '0.00'}`}
               />
               <StatCard 
                 title="Ppk (Performance)" 
-                value={stats?.ppk.toFixed(3) || '0.000'} 
+                value={stats?.ppk ? stats.ppk.toFixed(3) : '0.000'} 
                 icon={<Activity className="w-4 h-4" />}
                 status={stats && stats.ppk > 1.33 ? 'success' : 'danger'}
-                subValue={`Pp: ${stats?.pp.toFixed(2) || '0.00'}`}
+                subValue={`Pp: ${stats?.pp ? stats.pp.toFixed(2) : '0.00'}`}
               />
               <StatCard 
                 title="Normalfördelning" 
                 value={stats?.isNormal ? 'JA' : 'NEJ'} 
                 icon={<Brain className="w-4 h-4" />}
                 status={stats?.isNormal ? 'success' : 'warning'}
-                subValue={`p: ${stats?.shapiroWilkP.toFixed(4) || '0.0000'}`}
+                subValue={`p: ${stats?.shapiroWilkP ? stats.shapiroWilkP.toFixed(4) : '0.0000'}`}
               />
               <StatCard 
                 title="Process-Status" 
@@ -671,11 +785,13 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-[9px] text-muted-foreground uppercase">Mean</p>
-                    <p className="text-sm font-black">{stats?.mean.toFixed(3)}</p>
+                    <p className="text-sm font-black">{stats?.mean ? stats.mean.toFixed(3) : '–'}</p>
                   </div>
                   <div>
-                    <p className="text-[9px] text-muted-foreground uppercase">Std Dev</p>
-                    <p className="text-sm font-black">{stats?.stdDev.toFixed(4)}</p>
+                    <p className="text-[9px] text-muted-foreground uppercase">σ Overall / σ Within</p>
+                    <p className="text-sm font-black">
+                      {stats?.stdDev ? stats.stdDev.toFixed(3) : '–'} / {stats?.stdDevWithin ? stats.stdDevWithin.toFixed(3) : '–'}
+                    </p>
                   </div>
                 </div>
               </Card>
@@ -686,11 +802,11 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-[9px] text-muted-foreground uppercase">Skewness</p>
-                    <p className="text-sm font-black">{stats?.skewness.toFixed(3)}</p>
+                    <p className="text-sm font-black">{stats?.skewness ? stats.skewness.toFixed(3) : '–'}</p>
                   </div>
                   <div>
                     <p className="text-[9px] text-muted-foreground uppercase">Kurtosis</p>
-                    <p className="text-sm font-black">{stats?.kurtosis.toFixed(3)}</p>
+                    <p className="text-sm font-black">{stats?.kurtosis ? stats.kurtosis.toFixed(3) : '–'}</p>
                   </div>
                 </div>
               </Card>
@@ -701,11 +817,11 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-[9px] text-muted-foreground uppercase">UCL</p>
-                    <p className="text-sm font-black text-amber-600">{stats?.ucl.toFixed(3)}</p>
+                    <p className="text-sm font-black text-amber-600">{stats?.ucl ? stats.ucl.toFixed(3) : '–'}</p>
                   </div>
                   <div>
                     <p className="text-[9px] text-muted-foreground uppercase">LCL</p>
-                    <p className="text-sm font-black text-amber-600">{stats?.lcl.toFixed(3)}</p>
+                    <p className="text-sm font-black text-amber-600">{stats?.lcl ? stats.lcl.toFixed(3) : '–'}</p>
                   </div>
                 </div>
               </Card>
@@ -745,11 +861,11 @@ export default function App() {
                   )}
                   <div className="flex items-center gap-3 text-[10px] font-bold text-muted-foreground uppercase tracking-wider bg-muted/30 px-3 py-1.5 rounded-full border border-border/50">
                     <div className="flex items-center gap-1.5">
-                      <div className="w-1.5 h-1.5 rounded-full bg-rose-500" /> {uslLabel}: <span className="text-primary font-black">{usl.toFixed(1)}</span>
+                      <div className="w-1.5 h-1.5 rounded-full bg-rose-500" /> {uslLabel}: <span className="text-primary font-black">{typeof usl === 'number' ? usl.toFixed(1) : usl}</span>
                     </div>
                     <div className="w-px h-3 bg-border mx-1" />
                     <div className="flex items-center gap-1.5">
-                      <div className="w-1.5 h-1.5 rounded-full bg-rose-500" /> {lslLabel}: <span className="text-primary font-black">{lsl.toFixed(1)}</span>
+                      <div className="w-1.5 h-1.5 rounded-full bg-rose-500" /> {lslLabel}: <span className="text-primary font-black">{typeof lsl === 'number' ? lsl.toFixed(1) : lsl}</span>
                     </div>
                   </div>
 
@@ -1020,14 +1136,27 @@ export default function App() {
                         dot={(props: any) => {
                           const { cx, cy, payload } = props;
                           const val = Number(payload[selectedMetric]);
-                          const isAnomaly = anomalies.some(a => a.timestamp === payload.timestamp);
+                          const isAnomaly = !!payload.anomalyType;
                           const isOut = val > usl || val < lsl;
                           
                           if (isAnomaly || isOut) {
                             return (
-                              <g>
-                                <circle cx={cx} cy={cy} r={6} fill="#f43f5e" fillOpacity={0.2} />
-                                <circle cx={cx} cy={cy} r={4} fill="#f43f5e" stroke="var(--card)" strokeWidth={2} />
+                              <g style={{ pointerEvents: 'none' }}>
+                                <circle cx={cx} cy={cy} r={8} fill={isOut ? "#f43f5e" : "#f59e0b"} fillOpacity={0.25} />
+                                <circle cx={cx} cy={cy} r={4} fill={isOut ? "#f43f5e" : "#f59e0b"} stroke="var(--card)" strokeWidth={1.5} />
+                                {payload.testNumber && (
+                                  <text 
+                                    x={cx} 
+                                    y={cy - 12} 
+                                    textAnchor="middle" 
+                                    fontSize="10" 
+                                    fontWeight="black" 
+                                    fill={isOut ? "#f43f5e" : "#f59e0b"}
+                                    className="select-none"
+                                  >
+                                    {payload.testNumber}
+                                  </text>
+                                )}
                               </g>
                             );
                           }
@@ -1088,14 +1217,22 @@ export default function App() {
                             {new Date(anomaly.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                           </div>
                           <div className="text-lg font-black tracking-tight text-rose-500">
-                            {anomaly.value.toFixed(2)}
+                            {typeof anomaly.value === 'number' ? anomaly.value.toFixed(2) : anomaly.value}
                           </div>
                         </div>
                         <div className={cn(
                           "px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest border",
-                          anomaly.type === 'out-of-bounds' ? "bg-rose-500/10 text-rose-500 border-rose-500/20" : "bg-amber-500/10 text-amber-500 border-amber-500/20"
+                          anomaly.type === 'out-of-bounds' ? "bg-rose-500/10 text-rose-500 border-rose-500/20" : 
+                          anomaly.type === 'trend' ? "bg-indigo-500/10 text-indigo-500 border-indigo-500/20" :
+                          anomaly.type === 'shift-in-mean' ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
+                          anomaly.type === 'low-variance' ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" :
+                          "bg-orange-500/10 text-orange-500 border-orange-500/20"
                         )}>
-                          {anomaly.type === 'out-of-bounds' ? 'Gränsöverskridande' : 'Plötsligt Skift'}
+                          {anomaly.type === 'out-of-bounds' ? 'Limiter' : 
+                           anomaly.type === 'trend' ? 'Trend' : 
+                           anomaly.type === 'shift-in-mean' ? 'Skift' : 
+                           anomaly.type === 'low-variance' ? 'Låg Var' :
+                           'Variation'}
                         </div>
                       </div>
                       <p className="text-xs text-muted-foreground leading-relaxed italic">
@@ -1358,7 +1495,9 @@ export default function App() {
               </div>
             </div>
           </div>
-        ) : (
+        )}
+
+        {activeTab === 'analysis' && (
           <div className="max-w-4xl mx-auto">
             <Card padding="none" className="card-print">
               <div className="no-print bg-primary px-6 py-4 flex items-center justify-between">
@@ -1434,10 +1573,153 @@ export default function App() {
             </Card>
           </div>
         )}
+        
+        {activeTab === 'history' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-black tracking-tight flex items-center gap-3">
+                  <FileText className="w-8 h-8 text-primary" />
+                  Rapporthistorik
+                </h2>
+                <p className="text-muted-foreground font-medium">Tidigare analyser sparade i molnet.</p>
+              </div>
+              <Button variant="outline" onClick={fetchReports} className="gap-2">
+                <RefreshCw className="w-4 h-4" /> Uppdatera
+              </Button>
+            </div>
+
+            {!user ? (
+              <Card className="p-12 text-center flex flex-col items-center justify-center gap-6 border-dashed">
+                <div className="p-4 bg-muted rounded-full">
+                  <Activity className="w-12 h-12 text-muted-foreground" />
+                </div>
+                <div className="max-w-sm">
+                  <h3 className="text-xl font-bold mb-2">Logga in för att se historik</h3>
+                  <p className="text-muted-foreground text-sm">
+                    Dina rapporter sparas säkert i molnet och kan kommas åt från alla dina enheter när du är inloggad.
+                  </p>
+                </div>
+                <Button variant="primary" size="lg" onClick={signInWithGoogle} className="gap-2">
+                  <Activity className="w-5 h-5" /> Logga in med Google
+                </Button>
+              </Card>
+            ) : reports.length === 0 ? (
+              <Card className="p-12 text-center text-muted-foreground border-dashed">
+                Inga sparade rapporter hittades. Kör en AI-analys för att skapa din första rapport.
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {reports.map((report) => (
+                  <Card key={report.id} className="overflow-hidden border-border/50 hover:border-primary/50 transition-colors">
+                    <div className="p-4 border-b border-border bg-muted/20 flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <div className={cn(
+                          "px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest text-white",
+                          report.status === 'RÖD' ? 'bg-rose-500' : 
+                          report.status === 'GUL' ? 'bg-amber-500' : 'bg-emerald-500'
+                        )}>
+                          {report.status}
+                        </div>
+                        <span className="text-xs font-bold text-muted-foreground">
+                          {new Date(report.timestamp).toLocaleString('sv-SE')}
+                        </span>
+                      </div>
+                      <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1">
+                        <TrendingUp className="w-3 h-3" />
+                        {report.metric}
+                      </div>
+                    </div>
+                    <div className="p-6">
+                      <div className="prose prose-sm prose-slate dark:prose-invert max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                        <Markdown>{report.content}</Markdown>
+                      </div>
+                      <div className="mt-6 flex gap-2">
+                        <Button 
+                          variant="outline" 
+                          size="sm" 
+                          className="w-full gap-2"
+                          onClick={() => {
+                            setAiAnalysis(report.content);
+                            setActiveTab('analysis');
+                          }}
+                        >
+                          <Search className="w-4 h-4" /> Öppna Analys
+                        </Button>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </main>
       {isSopOpen && <SopModal isOpen={isSopOpen} onClose={() => setIsSopOpen(false)} />}
+      <ImportWizard 
+        isOpen={isImportWizardOpen} 
+        onClose={() => setIsImportWizardOpen(false)} 
+        onImport={handleImportedData}
+        downloadTemplate={downloadTemplate}
+      />
     </div>
   );
+}
+
+function CustomTooltip({ active, payload, label }: any) {
+  if (active && payload && payload.length) {
+    return (
+      <Card className="p-3 shadow-xl border-primary/20 bg-background/95 backdrop-blur-sm animate-in zoom-in-95 duration-200">
+        <p className="text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-2 border-b border-border pb-1">
+          {label}
+        </p>
+        <div className="space-y-1.5">
+          {payload.map((entry: any, index: number) => (
+            <div key={index} className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: entry.color }} />
+                <span className="text-[10px] font-bold text-foreground">{entry.name}:</span>
+              </div>
+              <span className="text-xs font-black text-primary">
+                {typeof entry.value === 'number' ? entry.value.toFixed(3) : entry.value}
+              </span>
+            </div>
+          ))}
+          {payload[0].payload.anomalyType && (
+            <div className="mt-2 pt-2 border-t border-rose-500/20 text-rose-500">
+               <p className="text-[8px] font-black uppercase tracking-widest flex items-center gap-1">
+                 <AlertCircle className="w-3 h-3" /> Avvikelse Detekterad
+               </p>
+               <p className="text-[9px] font-bold leading-tight mt-1 italic">
+                 "{payload[0].payload.explanation || 'Statistisk anomali identifierad.'}"
+               </p>
+            </div>
+          )}
+        </div>
+      </Card>
+    );
+  }
+  return null;
+}
+
+function DistTooltip({ active, payload }: any) {
+  if (active && payload && payload.length) {
+    const entry = payload[0];
+    return (
+      <Card className="p-3 shadow-xl border-primary/20 bg-background/95 backdrop-blur-sm animate-in zoom-in-95 duration-200">
+        <div className="space-y-1">
+          <p className="text-[10px] font-black text-muted-foreground uppercase tracking-widest border-b border-border pb-1 mb-1">
+            Intervall: {entry.payload.bin}
+          </p>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-[10px] font-bold">Antal:</span>
+            <span className="text-xs font-black text-primary">{entry.value}</span>
+          </div>
+        </div>
+      </Card>
+    );
+  }
+  return null;
 }
 
 function SopModal({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) {
@@ -1557,6 +1839,31 @@ function SopModal({ isOpen, onClose }: { isOpen: boolean, onClose: () => void })
               </div>
             }
           />
+
+          <SopSection 
+            title="8. Statistiska Metoder" 
+            icon={<Brain className="w-4 h-4" />}
+            content={
+              <div className="space-y-4">
+                <p className="text-xs font-bold text-primary italic">Appen följer standardiserade metoder för statistisk processkontroll (liknande Minitab):</p>
+                <div className="space-y-2">
+                  <p className="text-[10px]"><span className="font-bold">Kapabilitet (Cp/Cpk):</span> Beräknas enligt <span className="font-bold underline text-primary">Shewhart-metoden</span>. Vi använder <em>Within-Subgroup variation</em> (Average Moving Range / 1.128) för att se processens kortsiktiga potential.</p>
+                  <p className="text-[10px]"><span className="font-bold">Prestanda (Pp/Ppk):</span> Beräknas med <span className="font-bold underline text-primary">Overall Standard Deviation</span> (rotformeln). Detta visar hur processen faktiskt presterat över tid inklusive alla typer av variation.</p>
+                  <p className="text-[10px]"><span className="font-bold">Trend-detektering:</span> Vi analyserar <span className="font-bold underline text-primary">Nelson Rules / Western Electric Rules</span>, inklusive:</p>
+                  <ul className="list-disc list-inside text-[9px] ml-2 text-muted-foreground">
+                    <li>Test 1: Punkt utanför 3-sigma (UCL/LCL).</li>
+                    <li>Test 2: 9 punkter i rad på samma sida om medelvärdet.</li>
+                    <li>Test 3: 6 punkter i rad med stadig ökning/minskning.</li>
+                    <li>Test 4: 14 punkter i rad som alternerar upp och ner.</li>
+                    <li>Test 5: 2 av 3 punkter utanför 2-sigma (samma sida).</li>
+                    <li>Test 6: 4 av 5 punkter utanför 1-sigma (samma sida).</li>
+                    <li>Test 7: 15 punkter i rad inom 1-sigma (hugging the center line).</li>
+                    <li>Test 8: 8 punkter i rad utanför 1-sigma (mixture pattern).</li>
+                  </ul>
+                </div>
+              </div>
+            }
+          />
         </div>
 
         <div className="p-6 border-t border-border bg-muted/30 flex justify-end">
@@ -1626,7 +1933,7 @@ function getHistogramData(data: ProductionData[], metric: string, binCount: numb
   const binSize = (max - min) / (binCount || 1);
   
   const bins = Array.from({ length: binCount }, (_, i) => ({
-    bin: (min + i * binSize).toFixed(1),
+    bin: (min + i * binSize).toFixed(1).toString(),
     count: 0
   }));
 
@@ -1637,3 +1944,4 @@ function getHistogramData(data: ProductionData[], metric: string, binCount: numb
 
   return bins;
 }
+
