@@ -8,11 +8,12 @@ export interface ProductionData {
 
 export interface StatsResult {
   mean: number;
-  stdDev: number;
-  cp: number;
-  cpk: number;
-  pp: number;
-  ppk: number;
+  stdDev: number;       // Overall (Standard Deviation)
+  stdDevWithin: number; // Within (Moving Range / 1.128)
+  cp: number;           // Potential (uses Within)
+  cpk: number;          // Potential (uses Within)
+  pp: number;           // Performance (uses Overall)
+  ppk: number;          // Performance (uses Overall)
   usl: number;
   lsl: number;
   ucl: number;
@@ -29,7 +30,7 @@ export interface Anomaly {
   timestamp: string;
   value: number;
   metric: string;
-  type: 'out-of-bounds' | 'sudden-shift' | 'high-variance' | 'trend' | 'shift-in-mean';
+  type: 'out-of-bounds' | 'sudden-shift' | 'high-variance' | 'trend' | 'shift-in-mean' | 'low-variance';
   explanation: string;
 }
 
@@ -40,7 +41,7 @@ export function detectAnomalies(data: ProductionData[], metric: string, usl: num
   if (values.length < 2) return [];
 
   const stats = calculateStats(values, usl, lsl);
-  const { mean, stdDev, ucl, lcl } = stats;
+  const { mean, stdDev, stdDevWithin, ucl, lcl } = stats;
 
   // 1. Out of Specification (OOS)
   data.forEach((point, index) => {
@@ -52,7 +53,7 @@ export function detectAnomalies(data: ProductionData[], metric: string, usl: num
         value: val,
         metric,
         type: 'out-of-bounds',
-        explanation: val > usl ? `Värdet (${val.toFixed(2)}) överskrider USL (${usl}).` : `Värdet (${val.toFixed(2)}) underskrider LSL (${lsl}).`
+        explanation: val > usl ? `Värdet (${typeof val === 'number' ? val.toFixed(2) : val}) överskrider USL (${usl}).` : `Värdet (${typeof val === 'number' ? val.toFixed(2) : val}) underskrider LSL (${lsl}).`
       });
     }
   });
@@ -67,7 +68,7 @@ export function detectAnomalies(data: ProductionData[], metric: string, usl: num
         value: val,
         metric,
         type: 'out-of-bounds',
-        explanation: `Punkt utanför kontrollgränserna (UCL: ${ucl.toFixed(2)}, LCL: ${lcl.toFixed(2)}). Processen är statistiskt "ur kontroll".`
+        explanation: `Punkt utanför kontrollgränserna (UCL: ${typeof ucl === 'number' ? ucl.toFixed(2) : ucl}, LCL: ${typeof lcl === 'number' ? lcl.toFixed(2) : lcl}). Processen är statistiskt "ur kontroll".`
       });
     }
   });
@@ -112,23 +113,134 @@ export function detectAnomalies(data: ProductionData[], metric: string, usl: num
     }
   }
 
+  // 5. Nelson Rule 4: 14 points in a row alternating up and down
+  if (values.length >= 14) {
+    for (let i = 13; i < values.length; i++) {
+      const last14 = values.slice(i - 13, i + 1);
+      let alternating = true;
+      for (let j = 1; j < last14.length - 1; j++) {
+        const diff1 = last14[j] - last14[j-1];
+        const diff2 = last14[j+1] - last14[j];
+        if ((diff1 > 0 && diff2 > 0) || (diff1 < 0 && diff2 < 0) || diff1 === 0 || diff2 === 0) {
+          alternating = false;
+          break;
+        }
+      }
+      if (alternating) {
+        anomalies.push({
+          id: `we4-${i}`,
+          timestamp: data[i].timestamp,
+          value: data[i][metric],
+          metric,
+          type: 'trend',
+          explanation: `Systematisk variation detekterad: 14 punkter i rad som alternerar upp och ner.`
+        });
+      }
+    }
+  }
+
+  // 6. Test 5: 2 out of 3 points > 2σ from center line (same side)
+  if (values.length >= 3) {
+    const sigma2 = 2 * stdDevWithin;
+    for (let i = 2; i < values.length; i++) {
+      const window = values.slice(i - 2, i + 1);
+      const above2s = window.filter(v => v > mean + sigma2).length >= 2;
+      const below2s = window.filter(v => v < mean - sigma2).length >= 2;
+      if (above2s || below2s) {
+        anomalies.push({
+          id: `we5-${i}`,
+          timestamp: data[i].timestamp,
+          value: data[i][metric],
+          metric,
+          type: 'high-variance',
+          explanation: `Test 5: 2 av 3 punkter utanför 2σ (samma sida).`
+        });
+      }
+    }
+  }
+
+  // 7. Test 6: 4 out of 5 points > 1σ from center line (same side)
+  if (values.length >= 5) {
+    const sigma1 = 1 * stdDevWithin;
+    for (let i = 4; i < values.length; i++) {
+      const window = values.slice(i - 4, i + 1);
+      const above1s = window.filter(v => v > mean + sigma1).length >= 4;
+      const below1s = window.filter(v => v < mean - sigma1).length >= 4;
+      if (above1s || below1s) {
+        anomalies.push({
+          id: `we6-${i}`,
+          timestamp: data[i].timestamp,
+          value: data[i][metric],
+          metric,
+          type: 'high-variance',
+          explanation: `Test 6: 4 av 5 punkter utanför 1σ (samma sida).`
+        });
+      }
+    }
+  }
+
+  // 8. Test 7: 15 points in a row within 1σ of center line (either side)
+  if (values.length >= 15) {
+    const sigma1 = 1 * stdDevWithin;
+    for (let i = 14; i < values.length; i++) {
+      const last15 = values.slice(i - 14, i + 1);
+      if (last15.every(v => Math.abs(v - mean) <= sigma1)) {
+        anomalies.push({
+          id: `we7-${i}`,
+          timestamp: data[i].timestamp,
+          value: data[i][metric],
+          metric,
+          type: 'low-variance',
+          explanation: `Test 7: 15 punkter i rad inom 1σ (hugging the center line).`
+        });
+      }
+    }
+  }
+
+  // 9. Test 8: 8 points in a row > 1σ from center line (either side)
+  if (values.length >= 8) {
+    const sigma1 = 1 * stdDevWithin;
+    for (let i = 7; i < values.length; i++) {
+      const last8 = values.slice(i - 7, i + 1);
+      if (last8.every(v => Math.abs(v - mean) > sigma1)) {
+        anomalies.push({
+          id: `we8-${i}`,
+          timestamp: data[i].timestamp,
+          value: data[i][metric],
+          metric,
+          type: 'high-variance',
+          explanation: `Test 8: 8 punkter i rad utanför 1σ (avoidance of the center line).`
+        });
+      }
+    }
+  }
+
   return anomalies;
 }
 
 export function calculateStats(data: number[], usl: number, lsl: number): StatsResult {
   const n = data.length;
   if (n < 3) return { 
-    mean: 0, stdDev: 0, cp: 0, cpk: 0, pp: 0, ppk: 0, usl, lsl, ucl: 0, lcl: 0, count: n, 
+    mean: 0, stdDev: 0, stdDevWithin: 0, cp: 0, cpk: 0, pp: 0, ppk: 0, usl, lsl, ucl: 0, lcl: 0, count: n, 
     skewness: 0, kurtosis: 0, isNormal: true, shapiroWilkP: 1 
   };
 
   const mean = data.reduce((a, b) => a + b, 0) / n;
   
-  // Standard Deviation (Short term / within subgroup estimation - simplified here as sample stdDev)
+  // Overall Standard Deviation (S_overall)
   const variance = data.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (n - 1);
   const stdDev = Math.sqrt(variance);
 
-  // Skewness and Kurtosis
+  // Within Subgroup Standard Deviation (S_within) 
+  // Estimated using Average Moving Range (typical for I-MR charts)
+  let sumMR = 0;
+  for (let i = 1; i < n; i++) {
+    sumMR += Math.abs(data[i] - data[i-1]);
+  }
+  const avgMR = sumMR / (n - 1);
+  const stdDevWithin = avgMR / 1.128; // 1.128 is d2 for n=2
+
+  // Skewness and Kurtosis (S_overall based)
   let skewness = 0;
   let kurtosis = 0;
   data.forEach(v => {
@@ -139,21 +251,21 @@ export function calculateStats(data: number[], usl: number, lsl: number): StatsR
   skewness = (n * skewness) / ((n - 1) * (n - 2) * Math.pow(stdDev, 3));
   kurtosis = (n * (n + 1) * kurtosis) / ((n - 1) * (n - 2) * (n - 3) * Math.pow(stdDev, 4)) - (3 * Math.pow(n - 1, 2)) / ((n - 2) * (n - 3));
 
-  // Cp / Cpk (Potential Capability)
-  const cp = (usl - lsl) / (6 * stdDev);
-  const cpu = (usl - mean) / (3 * stdDev);
-  const cpl = (mean - lsl) / (3 * stdDev);
+  // Cp / Cpk (Potential Capability) - Uses S_within (Shewhart)
+  const cp = (usl - lsl) / (6 * stdDevWithin);
+  const cpu = (usl - mean) / (3 * stdDevWithin);
+  const cpl = (mean - lsl) / (3 * stdDevWithin);
   const cpk = Math.min(cpu, cpl);
 
-  // Pp / Ppk (Performance Capability - usually uses total stdDev, here same as stdDev for simplicity)
+  // Pp / Ppk (Performance Capability) - Uses S_overall (Root formula)
   const pp = (usl - lsl) / (6 * stdDev);
   const ppu = (usl - mean) / (3 * stdDev);
   const ppl = (mean - lsl) / (3 * stdDev);
   const ppk = Math.min(ppu, ppl);
 
-  // Control Limits (3-sigma)
-  const ucl = mean + 3 * stdDev;
-  const lcl = mean - 3 * stdDev;
+  // Control Limits (3-sigma, typically based on S_within for Control Charts)
+  const ucl = mean + 3 * stdDevWithin;
+  const lcl = mean - 3 * stdDevWithin;
 
   // Shapiro-Wilk Normality Test (Simplified Approximation for small-medium samples)
   const shapiroResult = shapiroWilkTest(data);
@@ -161,6 +273,7 @@ export function calculateStats(data: number[], usl: number, lsl: number): StatsR
   return {
     mean,
     stdDev,
+    stdDevWithin,
     cp,
     cpk,
     pp,
